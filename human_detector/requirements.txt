@@ -1,3 +1,5 @@
 ultralytics
 flask
 requests
+opencv-python
+numpy

@@ -18,9 +18,10 @@ Response:
 """
 
 import argparse
-import io
 import logging
 
+import cv2
+import numpy as np
 import requests as http_requests
 from flask import Flask, Response, jsonify, request
 from ultralytics import YOLO
@@ -50,7 +51,14 @@ def load_model():
 def detect_humans(image_bytes: bytes) -> dict:
     """Run YOLOv8n on image bytes, return person detections."""
     m = load_model()
-    results = m(io.BytesIO(image_bytes), verbose=False)
+
+    # Decode JPEG/PNG bytes into a numpy array (BGR) for YOLO
+    arr = np.frombuffer(image_bytes, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        return {"error": "Could not decode image"}
+
+    results = m(img, verbose=False)
 
     detections = []
     for result in results:
