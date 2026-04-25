@@ -1095,7 +1095,114 @@ def run_http(port: int):
 
 # ── RTSP mode (FFmpeg → mediamtx) ─────────────────────────────────────────
 
+MEDIAMTX_VERSION = "1.12.2"
+
+
+def _find_mediamtx() -> str | None:
+    """Locate mediamtx binary on PATH or in common locations."""
+    found = shutil.which("mediamtx")
+    if found:
+        return found
+    # Check next to this file, the cwd, and the user data dir
+    import pathlib
+    candidates = [
+        pathlib.Path.cwd() / "mediamtx",
+        pathlib.Path.home() / ".local" / "bin" / "mediamtx",
+    ]
+    for path in candidates:
+        if path.is_file():
+            return str(path)
+    return None
+
+
+def _download_mediamtx() -> str:
+    """Download mediamtx to ~/.local/bin and return the path."""
+    import pathlib
+    import tarfile
+    import tempfile
+    import urllib.request
+
+    system = platform.system().lower()
+    if system == "darwin":
+        os_name = "darwin"
+    elif system == "linux":
+        os_name = "linux"
+    else:
+        raise RuntimeError(f"Unsupported OS for auto-download: {system}")
+
+    machine = platform.machine().lower()
+    if machine in ("arm64", "aarch64"):
+        arch = "arm64"
+    elif machine in ("x86_64", "amd64"):
+        arch = "amd64"
+    else:
+        raise RuntimeError(f"Unsupported architecture for auto-download: {machine}")
+
+    dest_dir = pathlib.Path.home() / ".local" / "bin"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / "mediamtx"
+
+    tarball_name = f"mediamtx_v{MEDIAMTX_VERSION}_{os_name}_{arch}.tar.gz"
+    url = f"https://github.com/bluenviron/mediamtx/releases/download/v{MEDIAMTX_VERSION}/{tarball_name}"
+
+    log.info("Downloading mediamtx v%s for %s/%s...", MEDIAMTX_VERSION, os_name, arch)
+    with tempfile.TemporaryDirectory() as tmp:
+        tarball_path = pathlib.Path(tmp) / tarball_name
+        urllib.request.urlretrieve(url, tarball_path)
+        with tarfile.open(tarball_path, "r:gz") as tf:
+            member = tf.getmember("mediamtx")
+            tf.extract(member, tmp)
+            extracted = pathlib.Path(tmp) / "mediamtx"
+            import shutil as _shutil
+            _shutil.move(str(extracted), str(dest))
+
+    dest.chmod(0o755)
+    log.info("Installed mediamtx to %s", dest)
+    return str(dest)
+
+
+def _ensure_mediamtx() -> str:
+    """Find or download mediamtx, return path to binary."""
+    path = _find_mediamtx()
+    if path:
+        return path
+    return _download_mediamtx()
+
+
+def _start_mediamtx(port: int) -> subprocess.Popen:
+    """Start mediamtx as a subprocess configured for the given RTSP port."""
+    binary = _ensure_mediamtx()
+    env = {
+        **dict(platform.system() == "Windows" and {} or {}),
+        "MTX_PROTOCOLS": "tcp",
+        "MTX_RTSPADDRESS": f":{port}",
+    }
+    full_env = {**dict(subprocess.os.environ), **env}
+    log.info("Starting mediamtx on :%d...", port)
+    proc = subprocess.Popen(
+        [binary],
+        env=full_env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    # Give it a moment to bind the port
+    time.sleep(1.0)
+    if proc.poll() is not None:
+        stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+        raise RuntimeError(f"mediamtx exited immediately: {stderr}")
+    log.info("mediamtx started (pid %d)", proc.pid)
+    return proc
+
+
 def run_rtsp(port: int):
+    mediamtx_proc = None
+    try:
+        mediamtx_proc = _start_mediamtx(port)
+    except Exception as exc:
+        log.error("Failed to start mediamtx: %s", exc)
+        shutdown_event.set()
+        return
+
     ffmpeg_bin = shutil.which("ffmpeg")
     if not ffmpeg_bin:
         if platform.system() == "Darwin":
@@ -1164,12 +1271,21 @@ def run_rtsp(port: int):
     proc.wait(timeout=5)
     log.info("FFmpeg process terminated.")
 
+    if mediamtx_proc and mediamtx_proc.poll() is None:
+        log.info("Stopping mediamtx (pid %d)...", mediamtx_proc.pid)
+        mediamtx_proc.terminate()
+        try:
+            mediamtx_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            mediamtx_proc.kill()
+        log.info("mediamtx stopped.")
+
 # ── Main ───────────────────────────────────────────────────────────────────
 
 def parse_args():
     p = argparse.ArgumentParser(description="Webcam broadcaster (HTTP or RTSP)")
     p.add_argument("protocol", choices=["http", "rtsp"], help="Stream protocol")
-    p.add_argument("--port", type=int, default=None, help="Port (default: 1080 for http, 1081 for rtsp)")
+    p.add_argument("--port", type=int, default=None, help="Port (default: 1080 for http, 8554 for rtsp)")
     p.add_argument("--camera", type=int, default=0, help="Camera index (default: 0)")
     p.add_argument("--resolution", type=str, default=None, help="WxH e.g. 1280x720")
     p.add_argument("--fps", type=int, default=30, help="Capture frame rate (default: 30)")
@@ -1186,7 +1302,7 @@ def main():
 
     port = args.port
     if port is None:
-        port = 1080 if args.protocol == "http" else 1081
+        port = 1080 if args.protocol == "http" else 8554
 
     width, height = None, None
     if args.resolution:

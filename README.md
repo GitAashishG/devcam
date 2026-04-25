@@ -23,7 +23,7 @@ pip install 'devcam[vision]'
 
 ```bash
 devcam http            # web UI + MJPEG stream on http://localhost:1080
-devcam rtsp            # RTSP stream on rtsp://localhost:1081/cam
+devcam rtsp            # RTSP stream on rtsp://localhost:8554/cam
 ```
 
 Open `http://localhost:1080/` to view the live stream, switch cameras, change resolution/FPS, mirror the view, and toggle human detection. Detection is lazy-loaded: the YOLO model only loads when you first enable it.
@@ -37,7 +37,7 @@ devcam {http,rtsp} [--port PORT] [--camera INDEX] [--resolution WxH] [--fps FPS]
 | Flag | Default | Description |
 |---|---|---|
 | `protocol` | *(required)* | `http` or `rtsp` |
-| `--port` | 1080 / 1081 | Stream port |
+| `--port` | 1080 / 8554 | Stream port |
 | `--camera` | 0 | Camera index |
 | `--resolution` | auto | `WxH` e.g. `1280x720` |
 | `--fps` | 30 | Capture and stream frame rate |
