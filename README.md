@@ -35,6 +35,8 @@ python camserver.py {http,rtsp} [--port PORT] [--camera INDEX] [--resolution WxH
 - **HTTP mode** → `http://localhost:1080/` (web viewer), `/stream` (MJPEG), `/snapshot` (single JPEG)
 - **RTSP mode** → `rtsp://localhost:1081/cam` (requires ffmpeg + mediamtx)
 
+The HTTP web viewer includes controls for camera selection, resolution, FPS, and turning capture on or off without restarting the server.
+
 | Flag | Default | Description |
 |---|---|---|
 | `protocol` | *(required)* | `http` or `rtsp` |
@@ -43,6 +45,23 @@ python camserver.py {http,rtsp} [--port PORT] [--camera INDEX] [--resolution WxH
 | `--resolution` | auto | `WxH` e.g. `1280x720` |
 | `--fps` | 30 | Capture and stream frame rate |
 | `--backend` | auto | `auto` (ZED first, then OpenCV), `cv2` (V4L2/USB), `zed` (ZED SDK) |
+
+### HTTP Control API
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/status` | GET | Current backend, selected camera, requested mode, actual mode, and capture state |
+| `/api/cameras` | GET | Available cameras for the active backend |
+| `/api/modes` | GET | Common resolution and FPS choices for the UI |
+| `/api/config` | POST | Start, stop, or switch camera settings |
+
+Example:
+
+```bash
+curl -X POST http://localhost:1080/api/config \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled":true,"camera":0,"width":1280,"height":720,"fps":15}'
+```
 
 ### Camera Backends
 

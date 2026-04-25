@@ -23,7 +23,7 @@ import threading
 import time
 
 import cv2
-from flask import Flask, Response, render_template_string
+from flask import Flask, Response, jsonify, render_template_string, request
 
 try:
     import pyzed.sl as sl
@@ -46,20 +46,95 @@ frame_lock = threading.Lock()
 shutdown_event = threading.Event()
 stream_fps: int = 30
 
+camera_control_lock = threading.Lock()
+capture_stop_event: threading.Event | None = None
+capture_thread: threading.Thread | None = None
+capture_fn = None
+active_backend = "cv2"
+camera_config = {
+    "camera": 0,
+    "width": None,
+    "height": None,
+    "fps": 30,
+    "enabled": True,
+}
+camera_status = {
+    "running": False,
+    "error": None,
+    "actual_width": None,
+    "actual_height": None,
+    "actual_fps": None,
+}
+
+COMMON_RESOLUTIONS = [
+    (320, 240),
+    (640, 480),
+    (800, 600),
+    (1280, 720),
+    (1920, 1080),
+    (2560, 1440),
+    (3840, 2160),
+]
+COMMON_FPS = [5, 10, 15, 24, 30, 60]
+
+
+def clear_latest_frame():
+    global latest_raw_frame, latest_jpeg
+    with frame_lock:
+        latest_raw_frame = None
+        latest_jpeg = None
+
+
+def update_camera_status(**updates):
+    with camera_control_lock:
+        camera_status.update(updates)
+
+
+def current_state():
+    with camera_control_lock:
+        state = {
+            "backend": active_backend,
+            "camera": camera_config["camera"],
+            "width": camera_config["width"],
+            "height": camera_config["height"],
+            "fps": camera_config["fps"],
+            "enabled": camera_config["enabled"],
+            **camera_status,
+        }
+    with frame_lock:
+        state["has_frame"] = latest_jpeg is not None
+    return state
+
 # ── Camera capture ─────────────────────────────────────────────────────────
 
-def capture_loop(camera_index: int, width: int | None, height: int | None, fps: int = 30):
+def capture_loop(
+    camera_index: int,
+    width: int | None,
+    height: int | None,
+    fps: int = 30,
+    stop_event: threading.Event | None = None,
+):
     global latest_raw_frame, latest_jpeg
+    stop_event = stop_event or shutdown_event
 
+    clear_latest_frame()
+    update_camera_status(
+        running=False,
+        error=None,
+        actual_width=None,
+        actual_height=None,
+        actual_fps=None,
+    )
     cap = cv2.VideoCapture(camera_index)
     if not cap.isOpened():
-        log.error("Cannot open camera %d", camera_index)
+        error = f"Cannot open camera {camera_index}"
+        log.error(error)
         if platform.system() == "Darwin":
             log.error(
                 "On macOS, ensure Terminal has camera permission: "
                 "System Settings → Privacy & Security → Camera"
             )
-        shutdown_event.set()
+        update_camera_status(running=False, error=error)
         return
 
     cap.set(cv2.CAP_PROP_FPS, fps)
@@ -71,8 +146,15 @@ def capture_loop(camera_index: int, width: int | None, height: int | None, fps: 
     actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     actual_fps = cap.get(cv2.CAP_PROP_FPS)
     log.info("Camera %d opened at %dx%d @ %.0f fps", camera_index, actual_w, actual_h, actual_fps)
+    update_camera_status(
+        running=True,
+        error=None,
+        actual_width=actual_w,
+        actual_height=actual_h,
+        actual_fps=round(actual_fps or fps, 1),
+    )
 
-    while not shutdown_event.is_set():
+    while not shutdown_event.is_set() and not stop_event.is_set():
         ok, frame = cap.read()
         if not ok:
             log.warning("Frame grab failed, retrying...")
@@ -86,13 +168,29 @@ def capture_loop(camera_index: int, width: int | None, height: int | None, fps: 
                 latest_jpeg = jpeg.tobytes()
 
     cap.release()
+    update_camera_status(running=False)
     log.info("Camera released.")
 
 # ── ZED SDK capture ────────────────────────────────────────────────────────
 
-def zed_capture_loop(camera_index: int, width: int | None, height: int | None, fps: int = 30):
+def zed_capture_loop(
+    camera_index: int,
+    width: int | None,
+    height: int | None,
+    fps: int = 30,
+    stop_event: threading.Event | None = None,
+):
     global latest_raw_frame, latest_jpeg
+    stop_event = stop_event or shutdown_event
 
+    clear_latest_frame()
+    update_camera_status(
+        running=False,
+        error=None,
+        actual_width=None,
+        actual_height=None,
+        actual_fps=None,
+    )
     cam = sl.Camera()
     params = sl.InitParameters()
     params.camera_fps = fps
@@ -105,12 +203,14 @@ def zed_capture_loop(camera_index: int, width: int | None, height: int | None, f
     devs = sl.Camera.get_device_list()
     available = [d for d in devs if str(d.camera_state) == "AVAILABLE"]
     if not available:
-        log.error("No ZED cameras available. Try: sudo systemctl restart zed_x_daemon")
-        shutdown_event.set()
+        error = "No ZED cameras available. Try: sudo systemctl restart zed_x_daemon"
+        log.error(error)
+        update_camera_status(running=False, error=error)
         return
     if camera_index >= len(available):
-        log.error("ZED camera index %d out of range (%d available)", camera_index, len(available))
-        shutdown_event.set()
+        error = f"ZED camera index {camera_index} out of range ({len(available)} available)"
+        log.error(error)
+        update_camera_status(running=False, error=error)
         return
 
     dev = available[camera_index]
@@ -119,8 +219,9 @@ def zed_capture_loop(camera_index: int, width: int | None, height: int | None, f
 
     status = cam.open(params)
     if status != sl.ERROR_CODE.SUCCESS:
-        log.error("ZED open failed: %s", status)
-        shutdown_event.set()
+        error = f"ZED open failed: {status}"
+        log.error(error)
+        update_camera_status(running=False, error=error)
         return
 
     info = cam.get_camera_information()
@@ -128,11 +229,18 @@ def zed_capture_loop(camera_index: int, width: int | None, height: int | None, f
     log.info("ZED opened at %dx%d @ %d fps", res.width, res.height, fps)
     if target_size:
         log.info("Resizing output to %dx%d", target_size[0], target_size[1])
+    update_camera_status(
+        running=True,
+        error=None,
+        actual_width=target_size[0] if target_size else res.width,
+        actual_height=target_size[1] if target_size else res.height,
+        actual_fps=fps,
+    )
 
     image = sl.Mat()
     runtime = sl.RuntimeParameters()
 
-    while not shutdown_event.is_set():
+    while not shutdown_event.is_set() and not stop_event.is_set():
         if cam.grab(runtime) == sl.ERROR_CODE.SUCCESS:
             cam.retrieve_image(image, sl.VIEW.LEFT)
             frame = image.get_data()[:, :, :3].copy()  # BGRA → BGR
@@ -149,7 +257,126 @@ def zed_capture_loop(camera_index: int, width: int | None, height: int | None, f
             time.sleep(0.01)
 
     cam.close()
+    update_camera_status(running=False)
     log.info("ZED camera closed.")
+
+
+def start_capture(camera_index: int, width: int | None, height: int | None, fps: int):
+    global capture_stop_event, capture_thread, stream_fps
+    if capture_fn is None:
+        raise RuntimeError("Camera backend has not been initialized")
+
+    stop_capture()
+    clear_latest_frame()
+    stream_fps = fps
+    with camera_control_lock:
+        camera_config.update(
+            camera=camera_index,
+            width=width,
+            height=height,
+            fps=fps,
+            enabled=True,
+        )
+        camera_status.update(
+            running=False,
+            error=None,
+            actual_width=None,
+            actual_height=None,
+            actual_fps=None,
+        )
+
+    capture_stop_event = threading.Event()
+    capture_thread = threading.Thread(
+        target=capture_fn,
+        args=(camera_index, width, height, fps, capture_stop_event),
+        daemon=True,
+    )
+    capture_thread.start()
+
+
+def stop_capture():
+    global capture_stop_event, capture_thread
+    thread = capture_thread
+    if capture_stop_event is not None:
+        capture_stop_event.set()
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=2.0)
+    capture_stop_event = None
+    capture_thread = None
+    clear_latest_frame()
+    with camera_control_lock:
+        camera_config["enabled"] = False
+        camera_status.update(running=False)
+
+
+def enumerate_cameras(max_index: int = 10):
+    state = current_state()
+    cameras = []
+
+    if active_backend == "zed":
+        if not HAS_ZED:
+            return cameras
+        devs = sl.Camera.get_device_list()
+        for idx, dev in enumerate(devs):
+            cameras.append(
+                {
+                    "index": idx,
+                    "label": f"ZED {dev.camera_model} ({dev.serial_number})",
+                    "available": str(dev.camera_state) == "AVAILABLE",
+                    "active": idx == state["camera"],
+                }
+            )
+        return cameras
+
+    seen = set()
+    if state["running"]:
+        cameras.append(
+            {
+                "index": state["camera"],
+                "label": f"Camera {state['camera']}",
+                "available": True,
+                "active": True,
+            }
+        )
+        seen.add(state["camera"])
+
+    for index in range(max_index):
+        if index in seen:
+            continue
+        cap = cv2.VideoCapture(index)
+        available = cap.isOpened()
+        if available:
+            cameras.append(
+                {
+                    "index": index,
+                    "label": f"Camera {index}",
+                    "available": True,
+                    "active": index == state["camera"],
+                }
+            )
+        cap.release()
+    return sorted(cameras, key=lambda item: item["index"])
+
+
+def available_modes():
+    state = current_state()
+    resolutions = [{"width": None, "height": None, "label": "Auto"}]
+    resolutions.extend(
+        {"width": width, "height": height, "label": f"{width}x{height}"}
+        for width, height in COMMON_RESOLUTIONS
+    )
+    if state["actual_width"] and state["actual_height"]:
+        actual = (state["actual_width"], state["actual_height"])
+        if actual not in COMMON_RESOLUTIONS:
+            resolutions.insert(
+                0,
+                {
+                    "width": actual[0],
+                    "height": actual[1],
+                    "label": f"{actual[0]}x{actual[1]} (current)",
+                },
+            )
+    return {"resolutions": resolutions, "fps": COMMON_FPS}
 
 # ── HTTP mode (Flask MJPEG) ────────────────────────────────────────────────
 
@@ -160,17 +387,297 @@ INDEX_HTML = """
 <html>
 <head>
   <title>camserver</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { background: #111; color: #eee; font-family: monospace;
-           display: flex; flex-direction: column; align-items: center;
-           margin-top: 2em; }
-    img  { max-width: 95vw; border: 2px solid #444; }
+        :root { color-scheme: dark; }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            background: #111315;
+            color: #eef2f3;
+            font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+        main {
+            min-height: 100vh;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 340px;
+            gap: 20px;
+            padding: 20px;
+        }
+        .viewer {
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .topbar {
+            min-height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+        }
+        h1 { margin: 0; font-size: 18px; font-weight: 650; letter-spacing: 0; }
+        .status {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            color: #b9c3c7;
+            font-size: 13px;
+            white-space: nowrap;
+        }
+        .dot {
+            width: 9px;
+            height: 9px;
+            border-radius: 999px;
+            background: #9aa3a7;
+            box-shadow: 0 0 0 3px rgba(154, 163, 167, 0.15);
+        }
+        .dot.on { background: #30d158; box-shadow: 0 0 0 3px rgba(48, 209, 88, 0.16); }
+        .dot.err { background: #ff9f0a; box-shadow: 0 0 0 3px rgba(255, 159, 10, 0.16); }
+        .frame-wrap {
+            position: relative;
+            flex: 1;
+            min-height: 420px;
+            display: grid;
+            place-items: center;
+            overflow: hidden;
+            background: #050607;
+            border: 1px solid #30363a;
+            border-radius: 8px;
+        }
+        img {
+            display: block;
+            width: 100%;
+            height: 100%;
+            max-height: calc(100vh - 96px);
+            object-fit: contain;
+        }
+        .placeholder {
+            position: absolute;
+            inset: 0;
+            display: none;
+            place-items: center;
+            color: #8e989d;
+            font-size: 14px;
+            text-align: center;
+            padding: 24px;
+            background: #08090a;
+        }
+        .placeholder.show { display: grid; }
+        aside {
+            align-self: start;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            padding: 16px;
+            border: 1px solid #30363a;
+            border-radius: 8px;
+            background: #181b1e;
+        }
+        .group { display: grid; gap: 8px; }
+        label { color: #b9c3c7; font-size: 12px; font-weight: 650; }
+        select, button {
+            width: 100%;
+            min-height: 38px;
+            border: 1px solid #3a4247;
+            border-radius: 6px;
+            background: #22272b;
+            color: #f4f7f8;
+            font: inherit;
+        }
+        select { padding: 0 10px; }
+        button {
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            font-weight: 650;
+        }
+        button.primary { background: #1f7a4d; border-color: #24985e; }
+        button.warn { background: #6b3d12; border-color: #925a1b; }
+        button:disabled { opacity: 0.5; cursor: wait; }
+        .meta {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            color: #b9c3c7;
+            font-size: 12px;
+        }
+        .meta span {
+            min-width: 0;
+            padding: 8px;
+            background: #121517;
+            border-radius: 6px;
+            overflow-wrap: anywhere;
+        }
+        .error { color: #ffbe5c; font-size: 13px; min-height: 18px; overflow-wrap: anywhere; }
+        @media (max-width: 880px) {
+            main { grid-template-columns: 1fr; padding: 12px; }
+            .frame-wrap { min-height: 280px; }
+            img { max-height: 58vh; }
+            aside { order: -1; }
+        }
   </style>
 </head>
 <body>
-  <h2>📷 camserver</h2>
-  <img src="/stream" alt="webcam stream" />
-  <p style="margin-top:1em;color:#888;">MJPEG stream: <code>/stream</code> · Snapshot: <code>/snapshot</code></p>
+    <main>
+        <section class="viewer" aria-label="Camera stream">
+            <div class="topbar">
+                <h1>camserver</h1>
+                <div class="status"><span id="statusDot" class="dot"></span><span id="statusText">Loading</span></div>
+            </div>
+            <div class="frame-wrap">
+                <img id="stream" src="/stream" alt="webcam stream" />
+                <div id="placeholder" class="placeholder">Camera is off</div>
+            </div>
+        </section>
+        <aside aria-label="Camera controls">
+            <button id="toggleButton" class="warn" type="button">Turn off camera</button>
+            <div class="group">
+                <label for="cameraSelect">Camera</label>
+                <select id="cameraSelect"></select>
+            </div>
+            <div class="group">
+                <label for="resolutionSelect">Resolution</label>
+                <select id="resolutionSelect"></select>
+            </div>
+            <div class="group">
+                <label for="fpsSelect">FPS</label>
+                <select id="fpsSelect"></select>
+            </div>
+            <button id="applyButton" class="primary" type="button">Apply</button>
+            <div class="meta">
+                <span id="backendMeta">Backend</span>
+                <span id="actualMeta">Actual</span>
+            </div>
+            <div id="errorText" class="error"></div>
+        </aside>
+    </main>
+    <script>
+        const cameraSelect = document.querySelector("#cameraSelect");
+        const resolutionSelect = document.querySelector("#resolutionSelect");
+        const fpsSelect = document.querySelector("#fpsSelect");
+        const applyButton = document.querySelector("#applyButton");
+        const toggleButton = document.querySelector("#toggleButton");
+        const statusDot = document.querySelector("#statusDot");
+        const statusText = document.querySelector("#statusText");
+        const streamImage = document.querySelector("#stream");
+        const placeholder = document.querySelector("#placeholder");
+        const backendMeta = document.querySelector("#backendMeta");
+        const actualMeta = document.querySelector("#actualMeta");
+        const errorText = document.querySelector("#errorText");
+
+        let state = null;
+
+        async function fetchJson(url, options) {
+            const response = await fetch(url, options);
+            const body = await response.json();
+            if (!response.ok) throw new Error(body.error || response.statusText);
+            return body;
+        }
+
+        function option(value, label, selected = false) {
+            const element = document.createElement("option");
+            element.value = value;
+            element.textContent = label;
+            element.selected = selected;
+            return element;
+        }
+
+        async function loadControls() {
+            const [cameras, modes] = await Promise.all([
+                fetchJson("/api/cameras"),
+                fetchJson("/api/modes"),
+            ]);
+
+            cameraSelect.replaceChildren(...cameras.cameras.map((camera) => {
+                const label = camera.available ? camera.label : `${camera.label} unavailable`;
+                const element = option(camera.index, label, state && camera.index === state.camera);
+                element.disabled = !camera.available;
+                return element;
+            }));
+
+            resolutionSelect.replaceChildren(
+                ...modes.resolutions.map((resolution) => {
+                    const value = resolution.width && resolution.height ? `${resolution.width}x${resolution.height}` : "auto";
+                    const selected = state && state.width === resolution.width && state.height === resolution.height;
+                    return option(value, resolution.label, selected);
+                })
+            );
+
+            fpsSelect.replaceChildren(
+                ...modes.fps.map((fps) => option(fps, `${fps}`, state && fps === state.fps))
+            );
+        }
+
+        function renderStatus() {
+            if (!state) return;
+            statusDot.className = "dot";
+            if (state.error) statusDot.classList.add("err");
+            if (state.running) statusDot.classList.add("on");
+
+            statusText.textContent = state.running ? "Live" : state.enabled ? "Starting" : "Off";
+            if (state.error) statusText.textContent = "Attention";
+            toggleButton.textContent = state.enabled ? "Turn off camera" : "Turn on camera";
+            toggleButton.className = state.enabled ? "warn" : "primary";
+            placeholder.classList.toggle("show", !state.enabled || !state.has_frame);
+            placeholder.textContent = state.enabled ? "Waiting for camera" : "Camera is off";
+            backendMeta.textContent = `Backend: ${state.backend}`;
+            const actual = state.actual_width && state.actual_height
+                ? `${state.actual_width}x${state.actual_height} @ ${state.actual_fps || state.fps} fps`
+                : "No active mode";
+            actualMeta.textContent = actual;
+            errorText.textContent = state.error || "";
+        }
+
+        async function refreshStatus() {
+            state = await fetchJson("/api/status");
+            renderStatus();
+        }
+
+        async function applyConfig(enabled = true) {
+            applyButton.disabled = true;
+            toggleButton.disabled = true;
+            const [width, height] = resolutionSelect.value === "auto"
+                ? [null, null]
+                : resolutionSelect.value.split("x").map(Number);
+            try {
+                state = await fetchJson("/api/config", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        enabled,
+                        camera: Number(cameraSelect.value || 0),
+                        width,
+                        height,
+                        fps: Number(fpsSelect.value || 30),
+                    }),
+                });
+                streamImage.src = enabled ? `/stream?ts=${Date.now()}` : "";
+                renderStatus();
+                await loadControls();
+            } catch (error) {
+                errorText.textContent = error.message;
+            } finally {
+                applyButton.disabled = false;
+                toggleButton.disabled = false;
+            }
+        }
+
+        applyButton.addEventListener("click", () => applyConfig(true));
+        toggleButton.addEventListener("click", () => applyConfig(!state || !state.enabled));
+
+        async function init() {
+            await refreshStatus();
+            await loadControls();
+            renderStatus();
+            setInterval(refreshStatus, 1500);
+        }
+
+        init().catch((error) => { errorText.textContent = error.message; });
+    </script>
 </body>
 </html>
 """
@@ -179,6 +686,48 @@ INDEX_HTML = """
 @app.route("/")
 def index():
     return render_template_string(INDEX_HTML)
+
+
+@app.route("/api/status")
+def api_status():
+    return jsonify(current_state())
+
+
+@app.route("/api/cameras")
+def api_cameras():
+    return jsonify({"cameras": enumerate_cameras()})
+
+
+@app.route("/api/modes")
+def api_modes():
+    return jsonify(available_modes())
+
+
+@app.route("/api/config", methods=["POST"])
+def api_config():
+    data = request.get_json(silent=True) or {}
+    enabled = bool(data.get("enabled", True))
+    if not enabled:
+        stop_capture()
+        return jsonify(current_state())
+
+    try:
+        camera_index = int(data.get("camera", camera_config["camera"]))
+        fps = int(data.get("fps", camera_config["fps"]))
+        width = data.get("width", camera_config["width"])
+        height = data.get("height", camera_config["height"])
+        width = int(width) if width else None
+        height = int(height) if height else None
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid camera configuration"}), 400
+
+    if fps <= 0:
+        return jsonify({"error": "FPS must be greater than zero"}), 400
+    if (width is None) != (height is None):
+        return jsonify({"error": "Resolution must include width and height"}), 400
+
+    start_capture(camera_index, width, height, fps)
+    return jsonify(current_state())
 
 
 def mjpeg_generator():
@@ -298,7 +847,7 @@ def parse_args():
 
 
 def main():
-    global stream_fps
+    global active_backend, capture_fn, stream_fps
     args = parse_args()
 
     port = args.port
@@ -339,6 +888,8 @@ def main():
         log.error("ZED SDK not installed. Install pyzed or use --backend cv2")
         sys.exit(1)
 
+    active_backend = backend
+
     # Start camera capture
     if backend == "zed":
         capture_fn = zed_capture_loop
@@ -346,13 +897,12 @@ def main():
         capture_fn = capture_loop
 
     stream_fps = args.fps
-
-    cam_thread = threading.Thread(
-        target=capture_fn, args=(args.camera, width, height, args.fps), daemon=True,
-    )
-    cam_thread.start()
+    start_capture(args.camera, width, height, args.fps)
     time.sleep(1.0)
     if shutdown_event.is_set():
+        sys.exit(1)
+    if args.protocol == "rtsp" and current_state()["error"]:
+        stop_capture()
         sys.exit(1)
 
     # Run selected protocol
@@ -369,6 +919,7 @@ def main():
     except KeyboardInterrupt:
         shutdown_event.set()
 
+    stop_capture()
     log.info("Goodbye.")
 
 
