@@ -16,3 +16,4 @@ dist/
 
 # YOLO downloads model weights on first use; keep generated weights out of releases.
 /yolov8n.pt
+mediamtx
