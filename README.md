@@ -29,7 +29,7 @@ curl "http://localhost:1082/detect?url=http://localhost:1080/snapshot"
 Captures webcam and broadcasts as HTTP MJPEG or RTSP. Pick one at launch.
 
 ```
-python camserver.py {http,rtsp} [--port PORT] [--camera INDEX] [--resolution WxH]
+python camserver.py {http,rtsp} [--port PORT] [--camera INDEX] [--resolution WxH] [--fps FPS] [--backend {auto,cv2,zed}]
 ```
 
 - **HTTP mode** → `http://localhost:1080/` (web viewer), `/stream` (MJPEG), `/snapshot` (single JPEG)
@@ -41,6 +41,20 @@ python camserver.py {http,rtsp} [--port PORT] [--camera INDEX] [--resolution WxH
 | `--port` | 1080 / 1081 | Stream port |
 | `--camera` | 0 | Camera index |
 | `--resolution` | auto | `WxH` e.g. `1280x720` |
+| `--fps` | 30 | Capture and stream frame rate |
+| `--backend` | auto | `auto` (ZED first, then OpenCV), `cv2` (V4L2/USB), `zed` (ZED SDK) |
+
+### Camera Backends
+
+- **cv2** — OpenCV V4L2 for USB webcams
+- **zed** — ZED SDK for ZED X / ZED X Mini on Jetson (requires `pyzed`)
+- **auto** *(default)* — tries ZED first, falls back to OpenCV
+
+### Jetson / ZED X Notes
+
+- If ZED cameras show as "NOT AVAILABLE", restart the daemon: `sudo systemctl restart zed_x_daemon`
+- Resolution is always opened at the camera's native mode; `--resolution` downscales in software
+- `--fps 5` or `--fps 15` recommended for low-bandwidth use cases
 
 ### RTSP Setup
 
