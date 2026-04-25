@@ -13,8 +13,14 @@ Easy local camera feeds for development and testing. `devcam` can expose a camer
 ## Quick Start
 
 ```bash
-pip install -r requirements.txt
+pip install -e .
 python -m devcam http
+```
+
+Install YOLO human detection support with the optional `vision` extra:
+
+```bash
+pip install -e ".[vision]"
 ```
 
 Open `http://localhost:1080/` to view the stream, switch cameras, change resolution/FPS, mirror webcam view, turn capture on or off, and enable human detection. Detection is lazy-loaded: the app starts without loading YOLO, and the model loads only when detection is enabled or `/api/detection/run` is called.
@@ -104,6 +110,42 @@ Detection response shape:
 ```
 
 If `ultralytics` is not installed, camera streaming still works. Detection endpoints return `available: false` with a clear error.
+
+## Python Package
+
+`devcam` is packaged with `pyproject.toml`. For local development:
+
+```bash
+pip install -e ".[vision]"
+devcam http
+```
+
+Build distribution artifacts:
+
+```bash
+pip install -e ".[dev]"
+python -m build
+```
+
+Before publishing, verify the package metadata and artifacts:
+
+```bash
+python -m twine check dist/*
+```
+
+Publish to TestPyPI first:
+
+```bash
+python -m twine upload --repository testpypi dist/*
+```
+
+Then publish to PyPI when ready:
+
+```bash
+python -m twine upload dist/*
+```
+
+Before a real PyPI release, confirm the `devcam` package name is available, choose a license intentionally, and consider adding a `LICENSE` file.
 
 ### Camera Backends
 

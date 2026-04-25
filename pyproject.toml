@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "devcam"
+version = "0.1.0"
+description = "Local camera feeds for development with HTTP, RTSP, and optional YOLO human detection."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "Aashish Ghimire" }
+]
+keywords = ["camera", "webcam", "mjpeg", "rtsp", "opencv", "yolo", "human-detection"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Framework :: Flask",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Video :: Capture",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = [
+    "flask>=3.0",
+    "numpy>=1.24",
+    "opencv-python>=4.8",
+]
+
+[project.optional-dependencies]
+vision = [
+    "ultralytics>=8.0",
+]
+dev = [
+    "build>=1.2",
+    "twine>=5.0",
+]
+
+[project.scripts]
+devcam = "camserver:main"
+
+[project.urls]
+Homepage = "https://github.com/GitAashishG/devcam"
+Repository = "https://github.com/GitAashishG/devcam"
+Issues = "https://github.com/GitAashishG/devcam/issues"
+
+[tool.setuptools]
+py-modules = ["camserver"]
+packages = ["devcam", "devcam.detection"]
+
+[tool.setuptools.package-data]
+devcam = ["py.typed"]
