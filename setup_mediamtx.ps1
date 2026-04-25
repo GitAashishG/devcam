@@ -24,8 +24,8 @@ Write-Host ""
 Write-Host "Done! Run mediamtx with:"
 Write-Host "  .\mediamtx.exe"
 Write-Host ""
-Write-Host "Then start camserver with RTSP enabled:"
-Write-Host "  python camserver.py rtsp"
+Write-Host "Then start devcam with RTSP enabled:"
+Write-Host "  python -m devcam rtsp"
 
 if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
     Write-Host ""

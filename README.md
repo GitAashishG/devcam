@@ -25,10 +25,10 @@ pip install -e ".[vision]"
 
 Open `http://localhost:1080/` to view the stream, switch cameras, change resolution/FPS, mirror webcam view, turn capture on or off, and enable human detection. Detection is lazy-loaded: the app starts without loading YOLO, and the model loads only when detection is enabled or `/api/detection/run` is called.
 
-The legacy entrypoint still works:
+The legacy entrypoint `devcam` CLI command also works:
 
 ```bash
-python camserver.py http
+devcam http
 ```
 
 ## Camera Server
@@ -182,14 +182,14 @@ Each time you use RTSP on macOS/Linux:
 
 ```bash
 ./mediamtx               # run in a separate terminal
-python camserver.py rtsp
+python -m devcam rtsp
 ```
 
 Each time you use RTSP on Windows PowerShell:
 
 ```powershell
 .\mediamtx.exe           # run in a separate terminal
-python camserver.py rtsp
+python -m devcam rtsp
 ```
 
 ## human_detector

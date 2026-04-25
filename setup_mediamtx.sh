@@ -46,8 +46,8 @@ echo ""
 echo "Done! Run mediamtx with:"
 echo "  ./mediamtx"
 echo ""
-echo "Then start camserver with RTSP enabled:"
-echo "  python camserver.py rtsp"
+echo "Then start devcam with RTSP enabled:"
+echo "  python -m devcam rtsp"
 
 if ! command -v ffmpeg >/dev/null 2>&1; then
     echo ""

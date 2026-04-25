@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-camserver.py — Dead-simple webcam broadcaster.
+devcam server — Dead-simple webcam broadcaster.
 
 Pick one protocol at launch:
-  python camserver.py http   →  MJPEG stream at http://0.0.0.0:1080/stream
-  python camserver.py rtsp   →  RTSP stream at rtsp://localhost:1081/cam  (needs ffmpeg + mediamtx)
+  python -m devcam http   →  MJPEG stream at http://0.0.0.0:1080/stream
+  python -m devcam rtsp   →  RTSP stream at rtsp://localhost:1081/cam  (needs ffmpeg + mediamtx)
 
 Camera backends:
   --backend cv2   →  OpenCV V4L2 (USB webcams)
@@ -38,7 +38,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
-log = logging.getLogger("camserver")
+log = logging.getLogger("devcam")
 
 # ── Shared state ────────────────────────────────────────────────────────────
 
@@ -434,7 +434,7 @@ INDEX_HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-  <title>camserver</title>
+  <title>devcam</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
         :root { color-scheme: dark; }
@@ -588,7 +588,7 @@ INDEX_HTML = """
     <main>
         <section class="viewer" aria-label="Camera stream">
             <div class="topbar">
-                <h1>camserver</h1>
+                <h1>devcam</h1>
                 <div class="status"><span id="statusDot" class="dot"></span><span id="statusText">Loading</span></div>
             </div>
             <div class="frame-wrap">

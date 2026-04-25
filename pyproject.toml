@@ -7,6 +7,7 @@ name = "devcam"
 version = "0.1.0"
 description = "Local camera feeds for development with HTTP, RTSP, and optional YOLO human detection."
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.10"
 authors = [
     { name = "Aashish Ghimire" }
@@ -42,7 +43,7 @@ dev = [
 ]
 
 [project.scripts]
-devcam = "camserver:main"
+devcam = "devcam.server:main"
 
 [project.urls]
 Homepage = "https://github.com/GitAashishG/devcam"
@@ -50,7 +51,6 @@ Repository = "https://github.com/GitAashishG/devcam"
 Issues = "https://github.com/GitAashishG/devcam/issues"
 
 [tool.setuptools]
-py-modules = ["camserver"]
 packages = ["devcam", "devcam.detection"]
 
 [tool.setuptools.package-data]
