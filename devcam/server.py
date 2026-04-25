@@ -621,6 +621,7 @@ INDEX_HTML = """
                 <span id="actualMeta">Actual</span>
             </div>
             <div class="panel-title">Human detection</div>
+            <div id="detectionPanel" style="display:none">
             <button id="detectionToggle" type="button">Enable detection</button>
             <div class="group">
                 <label for="confidenceRange">Confidence</label>
@@ -637,6 +638,10 @@ INDEX_HTML = """
                 </div>
             </div>
             <div id="detectionText" class="detection-line">Detection idle</div>
+            </div>
+            <div id="detectionUnavailable" class="detection-line" style="display:none">
+                Install with <code>pip install 'devcam[vision]'</code> to enable detection.
+            </div>
             <div id="errorText" class="error"></div>
         </aside>
     </main>
@@ -864,6 +869,15 @@ INDEX_HTML = """
 
         async function refreshDetectionStatus() {
             detectionState = await fetchJson("/api/detection/status");
+            const panel = document.querySelector("#detectionPanel");
+            const unavailable = document.querySelector("#detectionUnavailable");
+            if (detectionState.available) {
+                panel.style.display = "";
+                unavailable.style.display = "none";
+            } else {
+                panel.style.display = "none";
+                unavailable.style.display = "";
+            }
             renderDetectionStatus();
             startDetectionLoop();
         }
@@ -1171,25 +1185,56 @@ def _ensure_mediamtx() -> str:
 
 def _start_mediamtx(port: int) -> subprocess.Popen:
     """Start mediamtx as a subprocess configured for the given RTSP port."""
+    import pathlib
+    import tempfile
+
     binary = _ensure_mediamtx()
-    env = {
-        **dict(platform.system() == "Windows" and {} or {}),
-        "MTX_PROTOCOLS": "tcp",
-        "MTX_RTSPADDRESS": f":{port}",
-    }
-    full_env = {**dict(subprocess.os.environ), **env}
+    # Use high UDP ports to avoid conflicts with common services on 8000/8001
+    # RTP port must be even per RFC 3550
+    rtp_port = port + 2 if port % 2 == 0 else port + 1
+    rtcp_port = rtp_port + 1
+
+    # Write a minimal config file — mediamtx needs explicit path config to
+    # accept RTSP ANNOUNCE (publishing) and the empty-env-var trick is fragile
+    # across versions.
+    config = (
+        f"rtspAddress: :{port}\n"
+        f"rtpAddress: :{rtp_port}\n"
+        f"rtcpAddress: :{rtcp_port}\n"
+        "rtmp: no\n"
+        "hls: no\n"
+        "webrtc: no\n"
+        "srt: no\n"
+        "paths:\n"
+        "  all_others:\n"
+    )
+    config_dir = pathlib.Path(tempfile.gettempdir()) / "devcam"
+    config_dir.mkdir(exist_ok=True)
+    config_path = config_dir / "mediamtx.yml"
+    config_path.write_text(config)
+
     log.info("Starting mediamtx on :%d...", port)
+
     proc = subprocess.Popen(
-        [binary],
-        env=full_env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
+        [binary, str(config_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
     )
     # Give it a moment to bind the port
-    time.sleep(1.0)
+    time.sleep(1.5)
     if proc.poll() is not None:
-        stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
-        raise RuntimeError(f"mediamtx exited immediately: {stderr}")
+        output = proc.stdout.read().decode(errors="replace") if proc.stdout else ""
+        raise RuntimeError(f"mediamtx exited immediately:\n{output}")
+
+    # Drain stdout in background so pipe buffer doesn't block mediamtx
+    def _drain(pipe):
+        try:
+            for _ in pipe:
+                pass
+        except Exception:
+            pass
+    threading.Thread(target=_drain, args=(proc.stdout,), daemon=True).start()
+
     log.info("mediamtx started (pid %d)", proc.pid)
     return proc
 
@@ -1253,6 +1298,19 @@ def run_rtsp(port: int):
         log.error("ffmpeg launch failed.")
         shutdown_event.set()
         return
+
+    # Drain ffmpeg stderr in background to prevent pipe-buffer deadlock
+    def _drain_ffmpeg_stderr(pipe):
+        try:
+            for line in pipe:
+                msg = line.decode(errors="replace").rstrip()
+                if msg:
+                    log.debug("ffmpeg: %s", msg)
+        except Exception:
+            pass
+    threading.Thread(
+        target=_drain_ffmpeg_stderr, args=(proc.stderr,), daemon=True
+    ).start()
 
     while not shutdown_event.is_set():
         with frame_lock:
