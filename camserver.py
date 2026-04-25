@@ -25,6 +25,8 @@ import time
 import cv2
 from flask import Flask, Response, jsonify, render_template_string, request
 
+from devcam.detection import HumanDetector
+
 try:
     import pyzed.sl as sl
 
@@ -57,6 +59,7 @@ camera_config = {
     "height": None,
     "fps": 30,
     "enabled": True,
+    "mirror": False,
 }
 camera_status = {
     "running": False,
@@ -76,6 +79,15 @@ COMMON_RESOLUTIONS = [
     (3840, 2160),
 ]
 COMMON_FPS = [5, 10, 15, 24, 30, 60]
+
+detection_lock = threading.Lock()
+human_detector = HumanDetector()
+detection_config = {
+    "enabled": False,
+    "confidence": 0.5,
+    "interval_ms": 1000,
+    "model": "yolov8n.pt",
+}
 
 
 def clear_latest_frame():
@@ -99,11 +111,47 @@ def current_state():
             "height": camera_config["height"],
             "fps": camera_config["fps"],
             "enabled": camera_config["enabled"],
+            "mirror": camera_config["mirror"],
             **camera_status,
         }
     with frame_lock:
         state["has_frame"] = latest_jpeg is not None
     return state
+
+
+def detection_state():
+    with detection_lock:
+        config = dict(detection_config)
+    return {
+        **config,
+        "confidence_threshold": config["confidence"],
+        "available": human_detector.available,
+        "loaded": human_detector.loaded,
+        "error": human_detector.error if human_detector.available else "ultralytics is not installed",
+    }
+
+
+def update_detection_config(data: dict):
+    with detection_lock:
+        if "enabled" in data:
+            detection_config["enabled"] = bool(data["enabled"])
+        if "confidence" in data:
+            confidence = float(data["confidence"])
+            if not 0.0 <= confidence <= 1.0:
+                raise ValueError("Confidence must be between 0 and 1")
+            detection_config["confidence"] = confidence
+        if "interval_ms" in data:
+            interval_ms = int(data["interval_ms"])
+            if not 50 <= interval_ms <= 5000:
+                raise ValueError("Detection interval must be between 50 and 5000 ms")
+            detection_config["interval_ms"] = interval_ms
+        if "model" in data and data["model"]:
+            detection_config["model"] = str(data["model"])
+        human_detector.configure(
+            confidence_threshold=detection_config["confidence"],
+            model_name=detection_config["model"],
+        )
+        return dict(detection_config)
 
 # ── Camera capture ─────────────────────────────────────────────────────────
 
@@ -453,6 +501,14 @@ INDEX_HTML = """
             max-height: calc(100vh - 96px);
             object-fit: contain;
         }
+        img.mirrored { transform: scaleX(-1); }
+        .overlay-canvas {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
         .placeholder {
             position: absolute;
             inset: 0;
@@ -476,6 +532,7 @@ INDEX_HTML = """
             background: #181b1e;
         }
         .group { display: grid; gap: 8px; }
+        .panel-title { margin: 4px 0 0; color: #eef2f3; font-size: 13px; font-weight: 700; }
         label { color: #b9c3c7; font-size: 12px; font-weight: 650; }
         select, button {
             width: 100%;
@@ -498,6 +555,11 @@ INDEX_HTML = """
         button.primary { background: #1f7a4d; border-color: #24985e; }
         button.warn { background: #6b3d12; border-color: #925a1b; }
         button:disabled { opacity: 0.5; cursor: wait; }
+        input[type="range"] { width: 100%; accent-color: #30d158; }
+        input[type="checkbox"] { width: 16px; height: 16px; accent-color: #30d158; }
+        .check-row { display: flex; align-items: center; gap: 8px; color: #d6dcdf; font-size: 13px; }
+        .range-row { display: grid; grid-template-columns: 1fr 48px; align-items: center; gap: 8px; }
+        .range-value { color: #d6dcdf; font-size: 12px; text-align: right; }
         .meta {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -512,6 +574,7 @@ INDEX_HTML = """
             border-radius: 6px;
             overflow-wrap: anywhere;
         }
+        .detection-line { color: #b9c3c7; font-size: 12px; min-height: 18px; overflow-wrap: anywhere; }
         .error { color: #ffbe5c; font-size: 13px; min-height: 18px; overflow-wrap: anywhere; }
         @media (max-width: 880px) {
             main { grid-template-columns: 1fr; padding: 12px; }
@@ -530,6 +593,7 @@ INDEX_HTML = """
             </div>
             <div class="frame-wrap">
                 <img id="stream" src="/stream" alt="webcam stream" />
+                <canvas id="overlay" class="overlay-canvas"></canvas>
                 <div id="placeholder" class="placeholder">Camera is off</div>
             </div>
         </section>
@@ -547,11 +611,32 @@ INDEX_HTML = """
                 <label for="fpsSelect">FPS</label>
                 <select id="fpsSelect"></select>
             </div>
+            <label class="check-row" for="mirrorToggle">
+                <input id="mirrorToggle" type="checkbox" />
+                Mirror camera view
+            </label>
             <button id="applyButton" class="primary" type="button">Apply</button>
             <div class="meta">
                 <span id="backendMeta">Backend</span>
                 <span id="actualMeta">Actual</span>
             </div>
+            <div class="panel-title">Human detection</div>
+            <button id="detectionToggle" type="button">Enable detection</button>
+            <div class="group">
+                <label for="confidenceRange">Confidence</label>
+                <div class="range-row">
+                    <input id="confidenceRange" type="range" min="0.1" max="0.95" step="0.05" value="0.5" />
+                    <span id="confidenceValue" class="range-value">0.50</span>
+                </div>
+            </div>
+            <div class="group">
+                <label for="detectionHzRange">Detection rate</label>
+                <div class="range-row">
+                    <input id="detectionHzRange" type="range" min="1" max="20" step="1" value="1" />
+                    <span id="detectionHzValue" class="range-value">1 Hz</span>
+                </div>
+            </div>
+            <div id="detectionText" class="detection-line">Detection idle</div>
             <div id="errorText" class="error"></div>
         </aside>
     </main>
@@ -559,17 +644,27 @@ INDEX_HTML = """
         const cameraSelect = document.querySelector("#cameraSelect");
         const resolutionSelect = document.querySelector("#resolutionSelect");
         const fpsSelect = document.querySelector("#fpsSelect");
+        const mirrorToggle = document.querySelector("#mirrorToggle");
         const applyButton = document.querySelector("#applyButton");
         const toggleButton = document.querySelector("#toggleButton");
         const statusDot = document.querySelector("#statusDot");
         const statusText = document.querySelector("#statusText");
         const streamImage = document.querySelector("#stream");
+        const overlayCanvas = document.querySelector("#overlay");
         const placeholder = document.querySelector("#placeholder");
         const backendMeta = document.querySelector("#backendMeta");
         const actualMeta = document.querySelector("#actualMeta");
         const errorText = document.querySelector("#errorText");
+        const detectionToggle = document.querySelector("#detectionToggle");
+        const confidenceRange = document.querySelector("#confidenceRange");
+        const confidenceValue = document.querySelector("#confidenceValue");
+        const detectionHzRange = document.querySelector("#detectionHzRange");
+        const detectionHzValue = document.querySelector("#detectionHzValue");
+        const detectionText = document.querySelector("#detectionText");
 
         let state = null;
+        let detectionState = null;
+        let detectionTimer = null;
 
         async function fetchJson(url, options) {
             const response = await fetch(url, options);
@@ -622,6 +717,8 @@ INDEX_HTML = """
             if (state.error) statusText.textContent = "Attention";
             toggleButton.textContent = state.enabled ? "Turn off camera" : "Turn on camera";
             toggleButton.className = state.enabled ? "warn" : "primary";
+            mirrorToggle.checked = Boolean(state.mirror);
+            streamImage.classList.toggle("mirrored", Boolean(state.mirror));
             placeholder.classList.toggle("show", !state.enabled || !state.has_frame);
             placeholder.textContent = state.enabled ? "Waiting for camera" : "Camera is off";
             backendMeta.textContent = `Backend: ${state.backend}`;
@@ -630,6 +727,166 @@ INDEX_HTML = """
                 : "No active mode";
             actualMeta.textContent = actual;
             errorText.textContent = state.error || "";
+        }
+
+        function renderDetectionStatus(result = null) {
+            if (!detectionState) return;
+            const threshold = detectionState.confidence_threshold ?? detectionState.confidence ?? 0.5;
+            const detectionHz = Math.max(1, Math.min(20, Math.round(1000 / Number(detectionState.interval_ms || 1000))));
+            confidenceRange.value = threshold;
+            confidenceValue.textContent = Number(threshold).toFixed(2);
+            detectionHzRange.value = detectionHz;
+            detectionHzValue.textContent = `${detectionHz} Hz`;
+            detectionToggle.textContent = detectionState.enabled ? "Disable detection" : "Enable detection";
+            detectionToggle.className = detectionState.enabled ? "warn" : "primary";
+
+            if (!detectionState.available) {
+                detectionText.textContent = detectionState.error || "Detection unavailable";
+                clearOverlay();
+                return;
+            }
+            if (!detectionState.enabled) {
+                detectionText.textContent = "Detection idle";
+                clearOverlay();
+                return;
+            }
+            if (!result) {
+                detectionText.textContent = detectionState.loaded ? "Detection active" : "Model will load on first scan";
+                return;
+            }
+            if (result.error) {
+                detectionText.textContent = result.error;
+                clearOverlay();
+                return;
+            }
+            detectionText.textContent = result.human_detected
+                ? `${result.count} person${result.count === 1 ? "" : "s"} · top ${Number(result.confidence).toFixed(2)} · ${result.latency_ms} ms`
+                : `No person · ${result.latency_ms} ms`;
+        }
+
+        function overlayRect(frameWidth, frameHeight) {
+            const bounds = overlayCanvas.getBoundingClientRect();
+            const canvasRatio = bounds.width / bounds.height;
+            const frameRatio = frameWidth / frameHeight;
+            let width = bounds.width;
+            let height = bounds.height;
+            let x = 0;
+            let y = 0;
+            if (frameRatio > canvasRatio) {
+                height = width / frameRatio;
+                y = (bounds.height - height) / 2;
+            } else {
+                width = height * frameRatio;
+                x = (bounds.width - width) / 2;
+            }
+            return { x, y, width, height };
+        }
+
+        function resizeOverlay() {
+            const bounds = overlayCanvas.getBoundingClientRect();
+            const scale = window.devicePixelRatio || 1;
+            const width = Math.max(1, Math.round(bounds.width * scale));
+            const height = Math.max(1, Math.round(bounds.height * scale));
+            if (overlayCanvas.width !== width || overlayCanvas.height !== height) {
+                overlayCanvas.width = width;
+                overlayCanvas.height = height;
+            }
+        }
+
+        function clearOverlay() {
+            resizeOverlay();
+            const context = overlayCanvas.getContext("2d");
+            context.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+        }
+
+        function drawDetections(result) {
+            clearOverlay();
+            if (!result || !result.frame_width || !result.frame_height || !result.detections.length) return;
+
+            const context = overlayCanvas.getContext("2d");
+            const scale = window.devicePixelRatio || 1;
+            const rect = overlayRect(result.frame_width, result.frame_height);
+            context.save();
+            context.scale(scale, scale);
+            context.lineWidth = 3;
+            context.strokeStyle = "#30d158";
+            context.fillStyle = "rgba(48, 209, 88, 0.18)";
+            context.font = "12px system-ui, sans-serif";
+
+            for (const detection of result.detections) {
+                const [x1, y1, x2, y2] = detection.bbox;
+                const x = state && state.mirror
+                    ? rect.x + ((result.frame_width - x2) / result.frame_width) * rect.width
+                    : rect.x + (x1 / result.frame_width) * rect.width;
+                const y = rect.y + (y1 / result.frame_height) * rect.height;
+                const width = ((x2 - x1) / result.frame_width) * rect.width;
+                const height = ((y2 - y1) / result.frame_height) * rect.height;
+                context.fillRect(x, y, width, height);
+                context.strokeRect(x, y, width, height);
+                const label = `person ${Number(detection.confidence).toFixed(2)}`;
+                const labelWidth = context.measureText(label).width + 10;
+                const labelY = Math.max(rect.y + 2, y - 22);
+                context.fillStyle = "#30d158";
+                context.fillRect(x, labelY, labelWidth, 20);
+                context.fillStyle = "#071009";
+                context.fillText(label, x + 5, labelY + 14);
+                context.fillStyle = "rgba(48, 209, 88, 0.18)";
+            }
+            context.restore();
+        }
+
+        function stopDetectionLoop() {
+            if (detectionTimer) clearTimeout(detectionTimer);
+            detectionTimer = null;
+        }
+
+        async function runDetectionOnce() {
+            if (!detectionState || !detectionState.enabled) return;
+            try {
+                const result = await fetchJson("/api/detection/run", { method: "POST" });
+                detectionState = { ...detectionState, ...result, confidence_threshold: result.confidence_threshold ?? detectionState.confidence_threshold };
+                drawDetections(result);
+                renderDetectionStatus(result);
+            } catch (error) {
+                detectionText.textContent = error.message;
+                clearOverlay();
+            } finally {
+                if (detectionState && detectionState.enabled) {
+                    detectionTimer = setTimeout(runDetectionOnce, detectionState.interval_ms);
+                }
+            }
+        }
+
+        function startDetectionLoop() {
+            stopDetectionLoop();
+            if (detectionState && detectionState.enabled) runDetectionOnce();
+        }
+
+        async function refreshDetectionStatus() {
+            detectionState = await fetchJson("/api/detection/status");
+            renderDetectionStatus();
+            startDetectionLoop();
+        }
+
+        async function applyDetectionConfig(enabled = null) {
+            detectionToggle.disabled = true;
+            try {
+                detectionState = await fetchJson("/api/detection/config", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        enabled: enabled === null ? detectionState.enabled : enabled,
+                        confidence: Number(confidenceRange.value),
+                        interval_ms: Math.round(1000 / Number(detectionHzRange.value || 1)),
+                    }),
+                });
+                renderDetectionStatus();
+                startDetectionLoop();
+            } catch (error) {
+                detectionText.textContent = error.message;
+            } finally {
+                detectionToggle.disabled = false;
+            }
         }
 
         async function refreshStatus() {
@@ -653,9 +910,11 @@ INDEX_HTML = """
                         width,
                         height,
                         fps: Number(fpsSelect.value || 30),
+                        mirror: mirrorToggle.checked,
                     }),
                 });
                 streamImage.src = enabled ? `/stream?ts=${Date.now()}` : "";
+                clearOverlay();
                 renderStatus();
                 await loadControls();
             } catch (error) {
@@ -668,9 +927,25 @@ INDEX_HTML = """
 
         applyButton.addEventListener("click", () => applyConfig(true));
         toggleButton.addEventListener("click", () => applyConfig(!state || !state.enabled));
+        mirrorToggle.addEventListener("change", async () => {
+            state = await fetchJson("/api/config", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ mirror: mirrorToggle.checked }),
+            });
+            renderStatus();
+            clearOverlay();
+        });
+        detectionToggle.addEventListener("click", () => applyDetectionConfig(!detectionState || !detectionState.enabled));
+        confidenceRange.addEventListener("input", () => { confidenceValue.textContent = Number(confidenceRange.value).toFixed(2); });
+        confidenceRange.addEventListener("change", () => applyDetectionConfig());
+        detectionHzRange.addEventListener("input", () => { detectionHzValue.textContent = `${detectionHzRange.value} Hz`; });
+        detectionHzRange.addEventListener("change", () => applyDetectionConfig());
+        window.addEventListener("resize", () => { if (detectionState && detectionState.enabled) clearOverlay(); });
 
         async function init() {
             await refreshStatus();
+            await refreshDetectionStatus();
             await loadControls();
             renderStatus();
             setInterval(refreshStatus, 1500);
@@ -707,8 +982,16 @@ def api_modes():
 def api_config():
     data = request.get_json(silent=True) or {}
     enabled = bool(data.get("enabled", True))
+    if "mirror" in data:
+        with camera_control_lock:
+            camera_config["mirror"] = bool(data["mirror"])
+    if set(data.keys()) == {"mirror"}:
+        return jsonify(current_state())
     if not enabled:
         stop_capture()
+        if "mirror" in data:
+            with camera_control_lock:
+                camera_config["mirror"] = bool(data["mirror"])
         return jsonify(current_state())
 
     try:
@@ -727,7 +1010,50 @@ def api_config():
         return jsonify({"error": "Resolution must include width and height"}), 400
 
     start_capture(camera_index, width, height, fps)
+    if "mirror" in data:
+        with camera_control_lock:
+            camera_config["mirror"] = bool(data["mirror"])
     return jsonify(current_state())
+
+
+@app.route("/api/detection/status")
+def api_detection_status():
+    return jsonify(detection_state())
+
+
+@app.route("/api/detection/config", methods=["POST"])
+def api_detection_config():
+    data = request.get_json(silent=True) or {}
+    try:
+        update_detection_config(data)
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(detection_state())
+
+
+@app.route("/api/detection/run", methods=["GET", "POST"])
+def api_detection_run():
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        if data:
+            try:
+                update_detection_config(data)
+            except (TypeError, ValueError) as exc:
+                return jsonify({"error": str(exc)}), 400
+
+    state = detection_state()
+    if not state["enabled"]:
+        return jsonify({**state, **human_detector.disabled_result(enabled=False)})
+
+    with frame_lock:
+        frame = latest_raw_frame.copy() if latest_raw_frame is not None else None
+    result = human_detector.detect(frame, enabled=True)
+    response = {**detection_state(), **result, "confidence_threshold": detection_config["confidence"]}
+    if frame is None:
+        return jsonify(response), 503
+    if not response["available"]:
+        return jsonify(response), 503
+    return jsonify(response)
 
 
 def mjpeg_generator():

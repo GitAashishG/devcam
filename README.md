@@ -1,41 +1,42 @@
-# camserver
+# devcam
 
-Dead-simple webcam broadcaster + human detection — two lightweight Python services.
+Easy local camera feeds for development and testing. `devcam` can expose a camera as HTTP MJPEG, publish RTSP, and optionally run YOLO human detection from the same web UI.
 
 ## Components
 
 | Service | Port | Description |
 |---|---|---|
-| `camserver.py` | 1080 | Webcam → HTTP MJPEG or RTSP stream |
-| `human_detector/detector.py` | 1082 | YOLOv8n person detection API |
+| `python -m devcam http` | 1080 | Web UI, HTTP MJPEG stream, snapshots, camera controls, optional human detection |
+| `python -m devcam rtsp` | 1081 | RTSP publisher (requires ffmpeg + mediamtx) |
+| `human_detector/detector.py` | 1082 | Legacy standalone YOLOv8n person detection API |
 
 ## Quick Start
 
 ```bash
-# Terminal 1: start webcam stream
 pip install -r requirements.txt
-python camserver.py http
-
-# Terminal 2: start human detector
-pip install -r human_detector/requirements.txt
-python human_detector/detector.py
-
-# Terminal 3: detect humans from live camera
-curl "http://localhost:1082/detect?url=http://localhost:1080/snapshot"
+python -m devcam http
 ```
 
-## camserver
+Open `http://localhost:1080/` to view the stream, switch cameras, change resolution/FPS, mirror webcam view, turn capture on or off, and enable human detection. Detection is lazy-loaded: the app starts without loading YOLO, and the model loads only when detection is enabled or `/api/detection/run` is called.
+
+The legacy entrypoint still works:
+
+```bash
+python camserver.py http
+```
+
+## Camera Server
 
 Captures webcam and broadcasts as HTTP MJPEG or RTSP. Pick one at launch.
 
 ```
-python camserver.py {http,rtsp} [--port PORT] [--camera INDEX] [--resolution WxH] [--fps FPS] [--backend {auto,cv2,zed}]
+python -m devcam {http,rtsp} [--port PORT] [--camera INDEX] [--resolution WxH] [--fps FPS] [--backend {auto,cv2,zed}]
 ```
 
 - **HTTP mode** → `http://localhost:1080/` (web viewer), `/stream` (MJPEG), `/snapshot` (single JPEG)
 - **RTSP mode** → `rtsp://localhost:1081/cam` (requires ffmpeg + mediamtx)
 
-The HTTP web viewer includes controls for camera selection, resolution, FPS, and turning capture on or off without restarting the server.
+The HTTP web viewer includes controls for camera selection, resolution, FPS, mirrored webcam display, turning capture on or off, enabling human detection, changing confidence threshold, changing detection rate up to 20 Hz, and drawing detection boxes over the live stream.
 
 | Flag | Default | Description |
 |---|---|---|
@@ -53,15 +54,56 @@ The HTTP web viewer includes controls for camera selection, resolution, FPS, and
 | `/api/status` | GET | Current backend, selected camera, requested mode, actual mode, and capture state |
 | `/api/cameras` | GET | Available cameras for the active backend |
 | `/api/modes` | GET | Common resolution and FPS choices for the UI |
-| `/api/config` | POST | Start, stop, or switch camera settings |
+| `/api/config` | POST | Start, stop, mirror, or switch camera settings |
 
 Example:
 
 ```bash
 curl -X POST http://localhost:1080/api/config \
   -H 'Content-Type: application/json' \
-  -d '{"enabled":true,"camera":0,"width":1280,"height":720,"fps":15}'
+  -d '{"enabled":true,"camera":0,"width":1280,"height":720,"fps":15,"mirror":true}'
 ```
+
+### Human Detection API
+
+Human detection runs in the same Flask process against the latest in-memory camera frame. It does not require running the old detector service in a second terminal.
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/detection/status` | GET | Detection availability, enabled state, confidence threshold, interval, model loaded state, and errors |
+| `/api/detection/config` | POST | Enable/disable detection and update settings |
+| `/api/detection/run` | GET/POST | Run YOLO person detection on the latest frame |
+
+Configuration example:
+
+```bash
+curl -X POST http://localhost:1080/api/detection/config \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled":true,"confidence":0.55,"interval_ms":50}'
+```
+
+`interval_ms` controls detection cadence. The UI slider supports 1-20 Hz, where 20 Hz is `50 ms`.
+
+Detection response shape:
+
+```json
+{
+  "enabled": true,
+  "available": true,
+  "human_detected": true,
+  "confidence": 0.87,
+  "confidence_threshold": 0.55,
+  "count": 1,
+  "frame_width": 1920,
+  "frame_height": 1080,
+  "latency_ms": 42.1,
+  "detections": [
+    {"confidence": 0.87, "bbox": [420.0, 160.0, 780.0, 940.0]}
+  ]
+}
+```
+
+If `ultralytics` is not installed, camera streaming still works. Detection endpoints return `available: false` with a clear error.
 
 ### Camera Backends
 
