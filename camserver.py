@@ -772,7 +772,15 @@ def run_http(port: int):
 def run_rtsp(port: int):
     ffmpeg_bin = shutil.which("ffmpeg")
     if not ffmpeg_bin:
-        log.error("ffmpeg not found. Install with: brew install ffmpeg")
+        if platform.system() == "Darwin":
+            install_hint = "brew install ffmpeg"
+        elif platform.system() == "Linux":
+            install_hint = "sudo apt install ffmpeg"
+        elif platform.system() == "Windows":
+            install_hint = "winget install Gyan.FFmpeg"
+        else:
+            install_hint = "install ffmpeg and ensure it is on PATH"
+        log.error("ffmpeg not found. Install with: %s", install_hint)
         shutdown_event.set()
         return
 

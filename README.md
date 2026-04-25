@@ -77,10 +77,34 @@ curl -X POST http://localhost:1080/api/config \
 
 ### RTSP Setup
 
+One-time setup on macOS/Linux:
+
 ```bash
-brew install ffmpeg
-bash setup_mediamtx.sh   # downloads mediamtx binary
-./mediamtx               # run in separate terminal
+# macOS: brew install ffmpeg
+# Linux: sudo apt install ffmpeg
+bash setup_mediamtx.sh   # downloads mediamtx for this OS/CPU
+```
+
+One-time setup on Windows PowerShell:
+
+> Windows setup has not been tested or validated yet.
+
+```powershell
+winget install Gyan.FFmpeg
+.\setup_mediamtx.ps1    # downloads mediamtx for Windows/CPU
+```
+
+Each time you use RTSP on macOS/Linux:
+
+```bash
+./mediamtx               # run in a separate terminal
+python camserver.py rtsp
+```
+
+Each time you use RTSP on Windows PowerShell:
+
+```powershell
+.\mediamtx.exe           # run in a separate terminal
 python camserver.py rtsp
 ```
 
